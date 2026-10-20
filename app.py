@@ -2,33 +2,23 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 import streamlit.components.v1 as components
-import os
+import requests
 
 # ==========================================
-# 1. KONFIGURASI & EXCEL SETUP
+# 1. KONFIGURASI & URL API GOOGLE SHEETS
 # ==========================================
 st.set_page_config(page_title="KaumPandak POS", page_icon="📍", layout="wide")
 
-EXCEL_FILE = "data_transaksi_pos.xlsx"
-COLS = ['ID TRANSAKSI','TIMESTAMP','TANGGAL','JAM','POS / BAGIAN','KATEGORI',
-        'JENIS PEMBAYARAN','NOMINAL','BIDANG UMUM','BIDANG KHUSUS',
-        'JUMLAH','PENANGGUNG JAWAB','KETERANGAN']
-
-# Fungsi untuk memuat data dari Excel jika file sudah ada
-def load_db():
-    if os.path.exists(EXCEL_FILE):
-        return pd.read_excel(EXCEL_FILE)
-    return pd.DataFrame(columns=COLS)
-
-# Fungsi untuk menyimpan Dataframe ke Excel
-def save_db(df):
-    df.to_excel(EXCEL_FILE, index=False)
+# URL WEB APP GOOGLE APPS SCRIPT ANDA
+URL_GOOGLE_SCRIPT = "https://script.google.com/macros/s/AKfycbxkq3PxJimfMY6cxfRleQluYFuWXSaVz7inRfcblrWfsnw4V1L4OJfLaU_USUfbteUSAw/exec"
 
 if 'role' not in st.session_state: st.session_state.role = None
 if 'role_name' not in st.session_state: st.session_state.role_name = None
 if 'cart' not in st.session_state: st.session_state.cart = []
 if 'last_receipt' not in st.session_state: st.session_state.last_receipt = None
-if 'db' not in st.session_state: st.session_state.db = load_db()
+# db sementara untuk riwayat tampilan di sesi aktif kasir
+if 'db_local' not in st.session_state: 
+    st.session_state.db_local = pd.DataFrame(columns=['Waktu', 'Pos', 'Item', 'Pembayaran', 'Nominal'])
 
 # ==========================================
 # 2. DATABASE MENU LENGKAP
@@ -191,9 +181,13 @@ def login(role_key, role_name):
         st.session_state.role_name = role_name
         st.rerun()
 
-def generate_trx_id():
-    now = datetime.now()
-    return f"TRX-{now.strftime('%Y%m%d')}-{len(st.session_state.db)+1:04d}"
+# Fungsi untuk mengirim satu payload transaksi ke Google Apps Script (Web App)
+def send_to_gsheets(payload):
+    try:
+        response = requests.post(URL_GOOGLE_SCRIPT, json=payload, timeout=15)
+        return True, response.text
+    except Exception as e:
+        return False, str(e)
 
 # ==========================================
 # 3. HALAMAN LOGIN UTAMA
@@ -252,19 +246,32 @@ else:
         nominal = st.number_input("Nominal (Rp):", min_value=0, step=5000)
         pembayaran = st.radio("Jenis Pembayaran:", ["CASH", "QRIS", "TRANSFER"], horizontal=True)
         
-        if st.button("Simpan Transaksi Admin", type="primary", use_container_width=True):
+        if st.button("Simpan Transaksi Admin ke GSheets", type="primary", use_container_width=True):
             if ("Khusus" in kategori and not bidang_khusus):
                 st.error("Nama Tiket Khusus / Bidang wajib diisi!")
             else:
-                now = datetime.now()
-                new_row = [
-                    generate_trx_id(), now, now.strftime("%d/%m/%Y"), now.strftime("%H:%M:%S"),
-                    "Admin", "khusus" if "Khusus" in kategori else "umum", pembayaran, 
-                    nominal, bidang_umum, bidang_khusus, 1, "Admin Kantor", keterangan
-                ]
-                st.session_state.db.loc[len(st.session_state.db)] = new_row
-                save_db(st.session_state.db) # SIMPAN KE EXCEL
-                st.success("✓ Transaksi Admin berhasil disimpan di Excel!")
+                payload = {
+                    "pos": "Admin",
+                    "kategori": "khusus" if "Khusus" in kategori else "umum",
+                    "pembayaran": pembayaran,
+                    "nominal": nominal,
+                    "bidangUmum": bidang_umum,
+                    "bidangKhusus": bidang_khusus,
+                    "jumlah": 1,
+                    "penanggungJawab": "Admin Kantor",
+                    "keterangan": keterangan
+                }
+                
+                with st.spinner('Menyimpan ke Google Sheets...'):
+                    success, msg = send_to_gsheets(payload)
+                    
+                if success:
+                    st.success("✓ Transaksi Admin berhasil disimpan di Google Sheets (Rekap otomatis berjalan)!")
+                    st.session_state.db_local.loc[len(st.session_state.db_local)] = [
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "Admin", bidang_khusus or bidang_umum, pembayaran, nominal
+                    ]
+                else:
+                    st.error(f"Gagal menyimpan ke Google Sheets: {msg}")
 
     # ----------------------------------------
     # B. PANEL KASIR (TRANSAKSI POS)
@@ -288,7 +295,7 @@ else:
             qty = st.number_input("Jumlah (Qty):", min_value=1, value=1)
             pembayaran = st.radio("Jenis Pembayaran:", ["CASH", "QRIS", "TRANSFER"], horizontal=True)
             
-            # Logika Khusus Loket (Tanpa Keranjang, Langsung Proses & Hitung Parkir)
+            # Logika Khusus Loket (Langsung Proses & Hitung Parkir)
             if st.session_state.role in ['Loket Motor', 'Loket Mobil']:
                 st.markdown("**Penambahan Parkir**")
                 parkir_name = "Parkir Motor" if st.session_state.role == 'Loket Motor' else "Parkir Mobil"
@@ -302,46 +309,64 @@ else:
                 st.error(f"Total Harus Dibayar: Rp {total_harga:,}")
                 uang = st.number_input("Uang Dibayarkan Konsumen (Rp):", min_value=0, step=5000)
                 
-                if st.button("Proses & Simpan ke Excel", type="primary", use_container_width=True):
+                if st.button("Proses & Simpan ke GSheets", type="primary", use_container_width=True):
                     if uang < total_harga:
                         st.error("Nominal uang pembayaran kurang dari total tagihan!")
                     else:
-                        now = datetime.now()
-                        trx_id = generate_trx_id()
-                        
-                        # Simpan Data Tiket Utama
-                        st.session_state.db.loc[len(st.session_state.db)] = [
-                            trx_id, now, now.strftime("%d/%m/%Y"), now.strftime("%H:%M:%S"),
-                            st.session_state.role_name, "umum", pembayaran, item_data['price'] * qty,
-                            item_data['bidang'], "", qty, f"Kasir {st.session_state.role}", item_data['name']
-                        ]
-                        
-                        # Simpan Data Parkir (Bila ada)
-                        if qty_parkir > 0:
-                            st.session_state.db.loc[len(st.session_state.db)] = [
-                                trx_id, now, now.strftime("%d/%m/%Y"), now.strftime("%H:%M:%S"),
-                                st.session_state.role_name, "umum", pembayaran, parkir_price * qty_parkir,
-                                parkir_name.lower(), "", qty_parkir, f"Kasir {st.session_state.role}", parkir_name
-                            ]
-                        
-                        save_db(st.session_state.db) # SIMPAN KE EXCEL
-                        
-                        # Record untuk Struk
-                        struk_items = f"{item_data['name']} ({qty}x) = Rp {item_data['price'] * qty:,}"
-                        if qty_parkir > 0: 
-                            struk_items += f"<br>{parkir_name} ({qty_parkir}x) = Rp {parkir_price * qty_parkir:,}"
+                        with st.spinner('Menyimpan transaksi ke Google Sheets...'):
+                            # 1. Payload Tiket Utama
+                            payload_tiket = {
+                                "pos": st.session_state.role_name,
+                                "kategori": "umum",
+                                "pembayaran": pembayaran,
+                                "nominal": item_data['price'],
+                                "bidangUmum": item_data['bidang'],
+                                "bidangKhusus": "",
+                                "jumlah": qty,
+                                "penanggungJawab": f"Kasir {st.session_state.role}",
+                                "keterangan": item_data['name']
+                            }
+                            success, msg = send_to_gsheets(payload_tiket)
                             
-                        st.session_state.last_receipt = {
-                            "pos": st.session_state.role_name,
-                            "waktu": now.strftime("%d/%m/%Y %H:%M:%S"),
-                            "items": struk_items,
-                            "total": total_harga,
-                            "bayar": uang,
-                            "metode": pembayaran
-                        }
-                        st.success(f"✓ Berhasil disimpan di Excel! Kembalian: Rp {uang - total_harga:,}")
+                            # 2. Payload Parkir (Bila ada)
+                            if qty_parkir > 0 and success:
+                                payload_parkir = {
+                                    "pos": st.session_state.role_name,
+                                    "kategori": "umum",
+                                    "pembayaran": pembayaran,
+                                    "nominal": parkir_price,
+                                    "bidangUmum": parkir_name.lower(),
+                                    "bidangKhusus": "",
+                                    "jumlah": qty_parkir,
+                                    "penanggungJawab": f"Kasir {st.session_state.role}",
+                                    "keterangan": parkir_name
+                                }
+                                success, msg = send_to_gsheets(payload_parkir)
                         
-            # Logika Pos Lain (Menggunakan Sistem Keranjang Belanja)
+                        if success:
+                            now = datetime.now()
+                            # Record Struk
+                            struk_items = f"{item_data['name']} ({qty}x) = Rp {item_data['price'] * qty:,}"
+                            if qty_parkir > 0: 
+                                struk_items += f"<br>{parkir_name} ({qty_parkir}x) = Rp {parkir_price * qty_parkir:,}"
+                                
+                            st.session_state.last_receipt = {
+                                "pos": st.session_state.role_name,
+                                "waktu": now.strftime("%d/%m/%Y %H:%M:%S"),
+                                "items": struk_items,
+                                "total": total_harga,
+                                "bayar": uang,
+                                "metode": pembayaran
+                            }
+                            # Simpan di local db UI
+                            st.session_state.db_local.loc[len(st.session_state.db_local)] = [
+                                now.strftime("%Y-%m-%d %H:%M:%S"), st.session_state.role_name, f"{item_data['name']} + Parkir", pembayaran, total_harga
+                            ]
+                            st.success(f"✓ Berhasil disimpan di Google Sheets! Kembalian: Rp {uang - total_harga:,}")
+                        else:
+                            st.error(f"Gagal mengirim ke Google Sheets: {msg}")
+                        
+            # Logika Pos Lain (Keranjang Belanja)
             else:
                 if st.button("➕ Tambah ke Keranjang Pesanan", use_container_width=True):
                     selected_idx = item_names.index(selected_item_str)
@@ -373,35 +398,52 @@ else:
                     st.error(f"Total Harus Dibayar: Rp {total_harga:,}")
                     uang = st.number_input("Uang Dibayarkan Konsumen (Rp):", min_value=0, step=5000)
                     
-                    if st.button("Proses & Simpan ke Excel", type="primary", use_container_width=True):
+                    if st.button("Proses & Simpan ke GSheets", type="primary", use_container_width=True):
                         if uang < total_harga:
                             st.error("Nominal uang pembayaran kurang dari total tagihan!")
                         else:
                             now = datetime.now()
-                            trx_id = generate_trx_id()
                             struk_items = []
+                            is_success = True
                             
-                            for item in st.session_state.cart:
-                                st.session_state.db.loc[len(st.session_state.db)] = [
-                                    trx_id, now, now.strftime("%d/%m/%Y"), now.strftime("%H:%M:%S"),
-                                    st.session_state.role_name, "umum", pembayaran, item['Subtotal'],
-                                    item['Bidang'], "", item['Qty'], f"Kasir {st.session_state.role}", item['Item']
-                                ]
-                                struk_items.append(f"{item['Item']} ({item['Qty']}x) = Rp {item['Subtotal']:,}")
+                            with st.spinner('Mengirim seluruh pesanan ke Google Sheets...'):
+                                for item in st.session_state.cart:
+                                    payload = {
+                                        "pos": st.session_state.role_name,
+                                        "kategori": "umum",
+                                        "pembayaran": pembayaran,
+                                        "nominal": item['Harga'],
+                                        "bidangUmum": item['Bidang'],
+                                        "bidangKhusus": "",
+                                        "jumlah": item['Qty'],
+                                        "penanggungJawab": f"Kasir {st.session_state.role}",
+                                        "keterangan": item['Item']
+                                    }
+                                    
+                                    success, msg = send_to_gsheets(payload)
+                                    if not success:
+                                        is_success = False
+                                        st.error(f"Gagal mengirim item {item['Item']}: {msg}")
+                                        break
+                                    
+                                    struk_items.append(f"{item['Item']} ({item['Qty']}x) = Rp {item['Subtotal']:,}")
+                            
+                            if is_success:
+                                st.session_state.last_receipt = {
+                                    "pos": st.session_state.role_name,
+                                    "waktu": now.strftime("%d/%m/%Y %H:%M:%S"),
+                                    "items": "<br>".join(struk_items),
+                                    "total": total_harga,
+                                    "bayar": uang,
+                                    "metode": pembayaran
+                                }
                                 
-                            save_db(st.session_state.db) # SIMPAN KE EXCEL
-                            
-                            st.session_state.last_receipt = {
-                                "pos": st.session_state.role_name,
-                                "waktu": now.strftime("%d/%m/%Y %H:%M:%S"),
-                                "items": "<br>".join(struk_items),
-                                "total": total_harga,
-                                "bayar": uang,
-                                "metode": pembayaran
-                            }
-                            st.session_state.cart = []
-                            st.success(f"✓ Berhasil disimpan di Excel! Kembalian: Rp {uang - total_harga:,}")
-                            st.rerun()
+                                st.session_state.db_local.loc[len(st.session_state.db_local)] = [
+                                    now.strftime("%Y-%m-%d %H:%M:%S"), st.session_state.role_name, f"Keranjang ({len(st.session_state.cart)} item)", pembayaran, total_harga
+                                ]
+                                st.session_state.cart = []
+                                st.success(f"✓ Seluruh pesanan berhasil masuk Google Sheets! Kembalian: Rp {uang - total_harga:,}")
+                                st.rerun()
 
     # ----------------------------------------
     # C. FITUR CETAK STRUK
@@ -443,23 +485,17 @@ else:
         components.html(html_struk, height=500)
 
     # ----------------------------------------
-    # D. RIWAYAT TRANSAKSI DARI EXCEL
+    # D. RIWAYAT LOKAL SEMENTARA (Sesi Berjalan)
     # ----------------------------------------
     st.divider()
-    st.subheader(f"Riwayat Transaksi (Data tersimpan di {EXCEL_FILE})")
+    st.subheader(f"Riwayat Sesi Aktif ({st.session_state.role_name})")
     
-    # Reload dari Excel setiap kali bagian riwayat di-*render*
-    current_db = load_db()
-    
+    current_db = st.session_state.db_local
     if st.session_state.role != "Admin":
-        current_db = current_db[current_db["POS / BAGIAN"] == st.session_state.role_name]
-    else:
-        filter_pos = st.selectbox("Sortir Laporan Admin Berdasarkan Pos:", ["-- SEMUA POS --"] + list(current_db['POS / BAGIAN'].unique()))
-        if filter_pos != "-- SEMUA POS --":
-            current_db = current_db[current_db["POS / BAGIAN"] == filter_pos]
-            
+        current_db = current_db[current_db["Pos"] == st.session_state.role_name]
+        
     st.dataframe(current_db, use_container_width=True)
     
     col_stat1, col_stat2 = st.columns(2)
-    col_stat1.info(f"Total Transaksi: {len(current_db)}")
-    col_stat2.success(f"Total Omset: Rp {current_db['NOMINAL'].sum():,}")
+    col_stat1.info(f"Transaksi di Sesi Ini: {len(current_db)}")
+    col_stat2.success(f"Omset Terkumpul di Sesi Ini: Rp {current_db['Nominal'].sum():,}")
