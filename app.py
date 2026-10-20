@@ -2,24 +2,36 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 import streamlit.components.v1 as components
+import os
 
 # ==========================================
-# 1. KONFIGURASI HALAMAN & SESSION STATE
+# 1. KONFIGURASI & EXCEL SETUP
 # ==========================================
 st.set_page_config(page_title="KaumPandak POS", page_icon="📍", layout="wide")
+
+EXCEL_FILE = "data_transaksi_pos.xlsx"
+COLS = ['ID TRANSAKSI','TIMESTAMP','TANGGAL','JAM','POS / BAGIAN','KATEGORI',
+        'JENIS PEMBAYARAN','NOMINAL','BIDANG UMUM','BIDANG KHUSUS',
+        'JUMLAH','PENANGGUNG JAWAB','KETERANGAN']
+
+# Fungsi untuk memuat data dari Excel jika file sudah ada
+def load_db():
+    if os.path.exists(EXCEL_FILE):
+        return pd.read_excel(EXCEL_FILE)
+    return pd.DataFrame(columns=COLS)
+
+# Fungsi untuk menyimpan Dataframe ke Excel
+def save_db(df):
+    df.to_excel(EXCEL_FILE, index=False)
 
 if 'role' not in st.session_state: st.session_state.role = None
 if 'role_name' not in st.session_state: st.session_state.role_name = None
 if 'cart' not in st.session_state: st.session_state.cart = []
-if 'db' not in st.session_state: 
-    cols = ['ID TRANSAKSI','TIMESTAMP','TANGGAL','JAM','POS / BAGIAN','KATEGORI',
-            'JENIS PEMBAYARAN','NOMINAL','BIDANG UMUM','BIDANG KHUSUS',
-            'JUMLAH','PENANGGUNG JAWAB','KETERANGAN']
-    st.session_state.db = pd.DataFrame(columns=cols)
 if 'last_receipt' not in st.session_state: st.session_state.last_receipt = None
+if 'db' not in st.session_state: st.session_state.db = load_db()
 
 # ==========================================
-# 2. DATABASE MENU LENGKAP (Sesuai index3.html)
+# 2. DATABASE MENU LENGKAP
 # ==========================================
 MENU = {
     'Loket Motor': [
@@ -218,6 +230,7 @@ else:
     if col_btn.button("🚪 Ganti Pos / Logout", use_container_width=True):
         st.session_state.role = None
         st.session_state.cart = []
+        st.session_state.last_receipt = None
         st.rerun()
         
     st.divider()
@@ -250,7 +263,8 @@ else:
                     nominal, bidang_umum, bidang_khusus, 1, "Admin Kantor", keterangan
                 ]
                 st.session_state.db.loc[len(st.session_state.db)] = new_row
-                st.success("✓ Transaksi Admin berhasil disimpan!")
+                save_db(st.session_state.db) # SIMPAN KE EXCEL
+                st.success("✓ Transaksi Admin berhasil disimpan di Excel!")
 
     # ----------------------------------------
     # B. PANEL KASIR (TRANSAKSI POS)
@@ -261,7 +275,7 @@ else:
         with col_form:
             st.subheader("Form Transaksi Pos")
             
-            # --- Penanganan Kategori Khusus Ban/Loker/Gazebo ---
+            # Penanganan Kategori Khusus Ban/Loker/Gazebo
             pos_key = st.session_state.role
             if pos_key == 'Ban / Loker / Gazebo':
                 sub_cat = st.selectbox("Pilih Kategori Fasilitas:", ["Ban", "Loker", "Gazebo"])
@@ -274,7 +288,7 @@ else:
             qty = st.number_input("Jumlah (Qty):", min_value=1, value=1)
             pembayaran = st.radio("Jenis Pembayaran:", ["CASH", "QRIS", "TRANSFER"], horizontal=True)
             
-            # --- Logika Khusus Loket (Tanpa Keranjang, Langsung Proses & Hitung Parkir) ---
+            # Logika Khusus Loket (Tanpa Keranjang, Langsung Proses & Hitung Parkir)
             if st.session_state.role in ['Loket Motor', 'Loket Mobil']:
                 st.markdown("**Penambahan Parkir**")
                 parkir_name = "Parkir Motor" if st.session_state.role == 'Loket Motor' else "Parkir Mobil"
@@ -288,7 +302,7 @@ else:
                 st.error(f"Total Harus Dibayar: Rp {total_harga:,}")
                 uang = st.number_input("Uang Dibayarkan Konsumen (Rp):", min_value=0, step=5000)
                 
-                if st.button("Proses & Simpan Transaksi", type="primary", use_container_width=True):
+                if st.button("Proses & Simpan ke Excel", type="primary", use_container_width=True):
                     if uang < total_harga:
                         st.error("Nominal uang pembayaran kurang dari total tagihan!")
                     else:
@@ -310,6 +324,8 @@ else:
                                 parkir_name.lower(), "", qty_parkir, f"Kasir {st.session_state.role}", parkir_name
                             ]
                         
+                        save_db(st.session_state.db) # SIMPAN KE EXCEL
+                        
                         # Record untuk Struk
                         struk_items = f"{item_data['name']} ({qty}x) = Rp {item_data['price'] * qty:,}"
                         if qty_parkir > 0: 
@@ -323,9 +339,9 @@ else:
                             "bayar": uang,
                             "metode": pembayaran
                         }
-                        st.success(f"✓ Transaksi berhasil! Kembalian Konsumen: Rp {uang - total_harga:,}")
+                        st.success(f"✓ Berhasil disimpan di Excel! Kembalian: Rp {uang - total_harga:,}")
                         
-            # --- Logika Pos Lain (Menggunakan Sistem Keranjang Belanja) ---
+            # Logika Pos Lain (Menggunakan Sistem Keranjang Belanja)
             else:
                 if st.button("➕ Tambah ke Keranjang Pesanan", use_container_width=True):
                     selected_idx = item_names.index(selected_item_str)
@@ -357,7 +373,7 @@ else:
                     st.error(f"Total Harus Dibayar: Rp {total_harga:,}")
                     uang = st.number_input("Uang Dibayarkan Konsumen (Rp):", min_value=0, step=5000)
                     
-                    if st.button("Proses & Simpan Transaksi", type="primary", use_container_width=True):
+                    if st.button("Proses & Simpan ke Excel", type="primary", use_container_width=True):
                         if uang < total_harga:
                             st.error("Nominal uang pembayaran kurang dari total tagihan!")
                         else:
@@ -373,6 +389,8 @@ else:
                                 ]
                                 struk_items.append(f"{item['Item']} ({item['Qty']}x) = Rp {item['Subtotal']:,}")
                                 
+                            save_db(st.session_state.db) # SIMPAN KE EXCEL
+                            
                             st.session_state.last_receipt = {
                                 "pos": st.session_state.role_name,
                                 "waktu": now.strftime("%d/%m/%Y %H:%M:%S"),
@@ -382,19 +400,18 @@ else:
                                 "metode": pembayaran
                             }
                             st.session_state.cart = []
-                            st.success(f"✓ Transaksi berhasil! Kembalian Konsumen: Rp {uang - total_harga:,}")
+                            st.success(f"✓ Berhasil disimpan di Excel! Kembalian: Rp {uang - total_harga:,}")
                             st.rerun()
 
     # ----------------------------------------
     # C. FITUR CETAK STRUK
     # ----------------------------------------
     st.divider()
-    if st.session_state.last_receipt:
+    if st.session_state.last_receipt and st.session_state.last_receipt['pos'] == st.session_state.role_name:
         st.subheader("Struk Transaksi Terakhir")
         r = st.session_state.last_receipt
         kembalian = r['bayar'] - r['total']
         
-        # Desain CSS & HTML Struk Printer Thermal
         html_struk = f"""
         <div style="border: 2px dashed #0277bd; padding: 15px; width: 350px; margin: auto; text-align: center; font-family: 'Courier New', Courier, monospace; background: #fafafa; border-radius: 8px;">
             <h3 style="margin: 0; color: #0277bd;">KAUMPANDAK WATERPARK</h3>
@@ -426,25 +443,23 @@ else:
         components.html(html_struk, height=500)
 
     # ----------------------------------------
-    # D. RIWAYAT TRANSAKSI / DATABASE
+    # D. RIWAYAT TRANSAKSI DARI EXCEL
     # ----------------------------------------
     st.divider()
-    st.subheader("Riwayat Data Transaksi LOKAL")
+    st.subheader(f"Riwayat Transaksi (Data tersimpan di {EXCEL_FILE})")
     
-    # Filter Tampilan History (Admin melihat semua, Kasir melihat pos masing-masing)
-    history_df = st.session_state.db
+    # Reload dari Excel setiap kali bagian riwayat di-*render*
+    current_db = load_db()
+    
     if st.session_state.role != "Admin":
-        history_df = history_df[history_df["POS / BAGIAN"] == st.session_state.role_name]
+        current_db = current_db[current_db["POS / BAGIAN"] == st.session_state.role_name]
     else:
-        filter_pos = st.selectbox("Sortir Laporan Admin Berdasarkan Pos:", ["-- SEMUA POS --"] + list(history_df['POS / BAGIAN'].unique()))
+        filter_pos = st.selectbox("Sortir Laporan Admin Berdasarkan Pos:", ["-- SEMUA POS --"] + list(current_db['POS / BAGIAN'].unique()))
         if filter_pos != "-- SEMUA POS --":
-            history_df = history_df[history_df["POS / BAGIAN"] == filter_pos]
+            current_db = current_db[current_db["POS / BAGIAN"] == filter_pos]
             
-    st.dataframe(history_df, use_container_width=True)
+    st.dataframe(current_db, use_container_width=True)
     
     col_stat1, col_stat2 = st.columns(2)
-    col_stat1.info(f"Total Transaksi: {len(history_df)}")
-    col_stat2.success(f"Total Omset: Rp {history_df['NOMINAL'].sum():,}")
-
-    st.markdown("---")
-    st.caption("💡 **Catatan Integrasi Google Sheets**: Untuk menghubungkan secara riil, Anda perlu menyiapkan `secrets.toml` di GitHub/Streamlit, lalu gunakan *method* `conn = st.connection('gsheets', type=GSheetsConnection)` dan jalankan perintah penulisan (seperti `conn.update(...)` atau `conn.append(...)`) setiap kali tombol proses transaksi ditekan.")
+    col_stat1.info(f"Total Transaksi: {len(current_db)}")
+    col_stat2.success(f"Total Omset: Rp {current_db['NOMINAL'].sum():,}")
